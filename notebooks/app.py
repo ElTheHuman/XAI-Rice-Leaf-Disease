@@ -5,10 +5,10 @@ from tensorflow.keras.preprocessing import image
 from tensorflow.keras.applications.resnet import preprocess_input, ResNet50
 from tensorflow.keras.layers import Dense, GlobalAveragePooling2D, Dropout, Input
 from tensorflow.keras.models import Model
-import cv2
+import matplotlib.pyplot as plt
 
 # =========================================================
-# BUILD MODEL (SAMA PERSIS DENGAN TRAINING)
+# BUILD MODEL
 # =========================================================
 def build_model():
     inp = Input(shape=(256, 256, 3))
@@ -24,14 +24,13 @@ def build_model():
 
 
 # =========================================================
-# LOAD MODEL UNTUK PREDIKSI (EAGER)
+# LOAD WEIGHTS
 # =========================================================
-WEIGHT_PATH = "../src/models/res_net_model_weight.h5"   # <--- EDIT SESUAI FILE KAMU
+WEIGHT_PATH = "../src/models/res_net_model_weight.h5"
 
 model = build_model()
 model.load_weights(WEIGHT_PATH)
 
-# Label class kamu (EDIT ya sayang)
 CLASS_NAMES = [
     "Bacterial Leaf Blight",
     "Brown Spot",
@@ -44,56 +43,58 @@ CLASS_NAMES = [
 
 
 # =========================================================
-# IMAGE PREPROCESSING
+# PREPROCESS IMAGE
 # =========================================================
 def preprocess_uploaded_image(uploaded_file):
+    # load original image dulu
     img = image.load_img(uploaded_file, target_size=(256, 256))
-    img_array = image.img_to_array(img)
-    img_array = preprocess_input(img_array)
-    img_array = np.expand_dims(img_array, axis=0)
-    return img_array, np.array(img)
+    raw_img = image.img_to_array(img)  # ini buat ditampilin
+
+    # preprocess untuk model
+    img_arr_pre = preprocess_input(raw_img.copy())  # jangan timpa raw_img
+    img_arr_pre = np.expand_dims(img_arr_pre, axis=0)
+
+    return img_arr_pre, raw_img  # preprocessed, original
 
 
 # =========================================================
-# PREDIKSI NORMAL
+# PREDICT
 # =========================================================
-def predict_image(img_array):
-    preds = model.predict(img_array, verbose=1)
+def predict(img_array):
+    preds = model.predict(img_array)
     idx = np.argmax(preds)
     return preds, idx
 
 
 # =========================================================
-# GENERATE LRP DARI MODEL WEIGHT (GRAPH MODE)
+# LRP FOR ONE IMAGE ONLY
 # =========================================================
-def generate_lrp(img_array):
-
+def generate_lrp_single(img_array):
     import innvestigate
     import innvestigate.analyzer.relevance_based.relevance_rule as rrule
     import innvestigate.analyzer.relevance_based.relevance_analyzer as ranalyzer
     import tensorflow.keras.layers as klayers
 
-    # Disable eager khusus untuk LRP
+    # disable eager for LRP only
     tf.compat.v1.disable_eager_execution()
 
-    # Build model lagi di graph mode
+    # build model in graph mode
     model_lrp = build_model()
     model_lrp.load_weights(WEIGHT_PATH)
 
-    # remove softmax (wajib)
+    # remove softmax
     try:
         model_wo_sm = innvestigate.utils.model_wo_softmax(model_lrp)
     except:
         model_wo_sm = model_lrp
 
-    # ============== CUSTOM RULES ==============
+    # custom rules
     class EpsilonProxyRule(rrule.EpsilonRule):
         def __init__(self, *args, **kwargs):
             super().__init__(*args, epsilon=0.1, bias=True, **kwargs)
 
     CONV_LAYERS = (
-        klayers.Conv1D, klayers.Conv2D, klayers.Conv3D,
-        klayers.SeparableConv2D, klayers.DepthwiseConv2D
+        klayers.Conv2D, klayers.Conv3D, klayers.SeparableConv2D, klayers.DepthwiseConv2D
     )
 
     PASS_LAYERS = (
@@ -102,9 +103,9 @@ def generate_lrp(img_array):
     )
 
     rules = [
-        (lambda layer: isinstance(layer, klayers.Dense), EpsilonProxyRule),
-        (lambda layer: isinstance(layer, CONV_LAYERS), rrule.Alpha2Beta1Rule),
-        (lambda layer: isinstance(layer, PASS_LAYERS), "Pass"),
+        (lambda l: isinstance(l, klayers.Dense), EpsilonProxyRule),
+        (lambda l: isinstance(l, CONV_LAYERS), rrule.Alpha2Beta1Rule),
+        (lambda l: isinstance(l, PASS_LAYERS), "Pass"),
     ]
 
     analyzer = ranalyzer.LRP(
@@ -114,36 +115,50 @@ def generate_lrp(img_array):
         bn_layer_rule=rrule.AlphaBetaX2m100Rule
     )
 
-    # LRP relevances
-    relevance = analyzer.analyze(img_array)[0]
+    # hanya 1 image
+    rel = analyzer.analyze(img_array)[0]   # shape (256,256,3)
 
-    # normalize
-    heat = relevance.sum(axis=-1)
-    heat = (heat - heat.min()) / (heat.max() - heat.min() + 1e-9)
+    # EXACT CODE FROM YOU
+    rel_map = rel.sum(axis=-1)                # reduce channels
+    vmax = np.percentile(np.abs(rel_map), 99) # 99th percentile
+    rel_map = np.clip(rel_map, -vmax, vmax)   # clip
+    rel_map /= vmax                           # normalize to [-1,1]
 
-    heat_img = cv2.applyColorMap((heat * 255).astype(np.uint8), cv2.COLORMAP_JET)
-
-    return heat_img
+    return rel_map  # 2D map
 
 
 # =========================================================
-# STREAMLIT UI
+# STREAMLIT APP
 # =========================================================
-st.title("🌾 Rice Leaf Classification + LRP (Weights Only)")
+st.title("🌾 Rice Leaf Classification + LRP (Single Image)")
 
-uploaded_file = st.file_uploader("Upload Image Daun", type=["jpg", "jpeg", "png"])
+uploaded = st.file_uploader("Upload Daun Padi", type=["jpg", "jpeg", "png"])
 
-if uploaded_file:
-    img_array, raw_img = preprocess_uploaded_image(uploaded_file)
-    st.image(raw_img, caption="Uploaded Image", width=300)
+if uploaded:
+    img_array, raw_img = preprocess_uploaded_image(uploaded)
 
-    preds, idx = predict_image(img_array)
+    # tampilkan image asli (bukan preprocessed)
+    st.image(raw_img.astype(np.uint8), caption="Uploaded Image", width=320)
+
+    preds, idx = predict(img_array)
+
     st.subheader("Prediction")
     st.write(f"**{CLASS_NAMES[idx]}**")
-    st.write("Probabilities:", preds[0])
+    st.write(preds[0])
 
-    if st.button("Generate LRP"):
-        st.write("Computing LRP… sabar sebentar ya sayang ❤️")
-        heatmap = generate_lrp(img_array)
-        st.image(heatmap, caption="LRP Heatmap", width=300)
-        st.success("Done sayanggg 💗")
+    if st.button("Generate LRP Map ❤️"):
+        st.write("Lagi dihitung ya sayang… 💕")
+
+        rel_map = generate_lrp_single(img_array)
+
+        # overlay LRP di atas image asli (lebih visual)
+        fig, ax = plt.subplots(figsize=(4, 4))
+        # ax.imshow(raw_img.astype(np.uint8)/255.0)  # tampilkan asli
+        # ax.imshow(rel_map, cmap="seismic", clim=(-1, 1), alpha=0.5)  # overlay
+        ax.imshow(rel_map, cmap="seismic", clim=(-1, 1))  # overlay
+        ax.set_title("LRP Relevance Map")
+        ax.axis("off")
+
+        st.pyplot(fig)
+
+        st.success("Done sayangg 💗")
