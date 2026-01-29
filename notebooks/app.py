@@ -218,14 +218,6 @@ if uploaded:
         for i in topk:
             st.write(f"- {CLASS_NAMES[i]}: **{preds[i]*100:.2f}%**")
 
-        # Small bar chart (no forced colors)
-        figp, axp = plt.subplots(figsize=(4, 2.8))
-        axp.bar([CLASS_NAMES[i] for i in topk], [preds[i] for i in topk])
-        axp.set_ylim(0, 1)
-        axp.set_ylabel("Probability")
-        axp.tick_params(axis="x", rotation=15)
-        st.pyplot(figp)
-
     st.divider()
 
     st.subheader("LRP Explainability")
